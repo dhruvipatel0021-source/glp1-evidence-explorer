@@ -159,13 +159,65 @@ if st.button("Compare Medications"):
                 response.raise_for_status()
                 pmids = response.json()["esearchresult"]["idlist"]
 
-                st.success(f"Retrieved {len(pmids)} PubMed records!")
+          st.success(f"Retrieved {len(pmids)} PubMed records!")
 
-                for pmid in pmids:
-                    st.markdown(
-                        f"- [View study {pmid}]"
-                        f"(https://pubmed.ncbi.nlm.nih.gov/{pmid}/)"
-                    )
+# Display all PubMed results
+for pmid in pmids:
+    st.markdown(
+        f"- [View study {pmid}]"
+        f"(https://pubmed.ncbi.nlm.nih.gov/{pmid}/)"
+    )
+
+# Test AI extraction on the first 3 studies
+st.subheader("AI-Extracted Clinical Evidence")
+
+test_pmids = pmids[:3]
+
+for pmid in test_pmids:
+    with st.expander(f"Study PMID: {pmid}", expanded=True):
+        try:
+            abstract_response = requests.get(
+                "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                params={
+                    "query": f"EXT_ID:{pmid} AND SRC:MED",
+                    "format": "json",
+                    "resultType": "core"
+                },
+                timeout=30
+            )
+            abstract_response.raise_for_status()
+
+            records = abstract_response.json()["resultList"]["result"]
+
+            if not records:
+                st.warning("Study not found.")
+                continue
+
+            abstract = records[0].get("abstractText", "")
+
+            if not abstract:
+                st.warning("No abstract available.")
+                continue
+
+            st.markdown(
+                f"[View original study](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)"
+            )
+
+            with st.spinner("Gemini is extracting clinical outcomes..."):
+                extraction = extract_with_gemini(abstract)
+
+            if "error" in extraction:
+                st.warning(f"AI extraction unavailable: {extraction['error']}")
+            else:
+                st.json(extraction)
+                st.caption(
+                    "AI-generated extraction from the abstract. "
+                    "Results require verification against the original study."
+                )
+
+        except (requests.RequestException, KeyError, IndexError) as error:
+            st.warning(f"Could not retrieve abstract: {error}")      
+            
 
                 st.info(
                     "AI extraction and clinical comparison "
