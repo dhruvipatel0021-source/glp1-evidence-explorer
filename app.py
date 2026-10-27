@@ -5,28 +5,35 @@ import json
 import time
 import re
 
+# ==========================================
+# WEBSITE SETTINGS
+# ==========================================
+
 st.set_page_config(
     page_title="GLP-1 Evidence Explorer",
     page_icon="💊",
     layout="wide"
 )
 
-# ----------------------------
-# Gemini AI extraction
-# ----------------------------
+# ==========================================
+# GEMINI AI EXTRACTION
+# ==========================================
 
 def extract_with_gemini(abstract):
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
     except (KeyError, FileNotFoundError):
-        return {"error": "Gemini API key is missing from Streamlit Secrets."}
+        return {
+            "error": "Gemini API key missing from Streamlit Secrets."
+        }
 
     prompt = f"""
-You are extracting evidence for a PharmD research project.
+You are extracting clinical trial evidence for a PharmD research project.
 
-Use ONLY the abstract below. Do not invent results.
+Use ONLY the provided abstract.
+Do not invent missing results or values.
 
-Return a JSON object with:
+Return a valid JSON object with these fields:
 - study_design
 - medications
 - doses
@@ -39,97 +46,105 @@ Return a JSON object with:
 
 Preserve separate treatment arms and doses.
 Use null for missing information.
-Include short exact source passages supporting numerical results.
-Do not give treatment recommendations.
+Provide short exact supporting passages for numerical results.
+Do not make treatment recommendations.
 
 ABSTRACT:
 {abstract}
 """
 
-    # Models can become unavailable or overloaded.
-    # Try the newer model first.
-    models = ["gemini-3.8-flash"]
+    model = "gemini-3.8-flash"
 
-    last_error = "No available Gemini model responded."
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/"
+        f"models/{model}:generateContent"
+    )
 
-    for model in models:
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/"
-            f"models/{model}:generateContent"
-        )
-
-        for attempt in range(2):
-            try:
-                response = requests.post(
-                    url,
-                    headers={
-                        "x-goog-api-key": api_key,
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "contents": [
-                            {"parts": [{"text": prompt}]}
-                        ],
-                        "generationConfig": {
-                            "responseMimeType": "application/json"
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                url,
+                headers={
+                    "x-goog-api-key": api_key,
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "contents": [
+                        {
+                            "parts": [
+                                {"text": prompt}
+                            ]
                         }
-                    },
-                    timeout=60
-                )
+                    ],
+                    "generationConfig": {
+                        "responseMimeType": "application/json"
+                    }
+                },
+                timeout=90
+            )
 
-                if response.status_code in (429, 503):
-                    last_error = (
-                        f"{model}: HTTP {response.status_code} "
-                        "(rate limit or high demand)"
+            if response.status_code in (429, 503):
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+
+                return {
+                    "error": (
+                        f"Gemini is temporarily unavailable "
+                        f"(HTTP {response.status_code})."
                     )
-                    if attempt == 0:
-                        time.sleep(3)
-                        continue
-                    break
+                }
 
-                if response.status_code in (400, 404):
-    return {
-        "error": (
-            f"Gemini returned HTTP {response.status_code}: "
-            f"{response.text[:500]}"
-        )
-    }
-                    last_error = f"{model}: model unavailable"
-                    break
+            if not response.ok:
+                try:
+                    message = response.json()["error"]["message"]
+                except (ValueError, KeyError, TypeError):
+                    message = response.text[:500]
 
-                response.raise_for_status()
+                return {
+                    "error": (
+                        f"Gemini HTTP {response.status_code}: "
+                        f"{message}"
+                    )
+                }
 
-                result = response.json()
-                parts = result["candidates"][0]["content"]["parts"]
-                extracted_text = "".join(
-                    part.get("text", "") for part in parts
-                )
+            result = response.json()
 
-                extracted = json.loads(extracted_text)
+            parts = result["candidates"][0]["content"]["parts"]
 
-                if not isinstance(extracted, dict):
-                    return {"error": "Gemini returned an unexpected format."}
+            extracted_text = "".join(
+                part.get("text", "") for part in parts
+            )
 
-                extracted["ai_model"] = model
-                return extracted
+            extracted = json.loads(extracted_text)
 
-            except (
-                requests.RequestException,
-                KeyError,
-                IndexError,
-                ValueError
-            ) as error:
-                last_error = str(error)
-                break
+            if not isinstance(extracted, dict):
+                return {
+                    "error": "Gemini returned an unexpected JSON format."
+                }
 
-    return {"error": last_error}
+            extracted["ai_model"] = model
+
+            return extracted
+
+        except requests.RequestException as error:
+            if attempt == 2:
+                return {"error": str(error)}
+
+        except (KeyError, IndexError, ValueError, TypeError) as error:
+            return {
+                "error": f"Could not parse Gemini response: {error}"
+            }
+
+    return {"error": "Gemini extraction failed."}
 
 
-# ----------------------------
-# PubMed search
-# ----------------------------
+# ==========================================
+# PUBMED SEARCH
+# ==========================================
 
 def search_pubmed(medications):
+
     drug_names = {
         "Ozempic (semaglutide)": "semaglutide",
         "Rybelsus (oral semaglutide)": "semaglutide",
@@ -138,9 +153,9 @@ def search_pubmed(medications):
         "Mounjaro (tirzepatide)": "tirzepatide"
     }
 
-    selected = list(dict.fromkeys(
-        drug_names[med] for med in medications
-    ))
+    selected = list(
+        dict.fromkeys(drug_names[med] for med in medications)
+    )
 
     drug_query = " OR ".join(
         f'"{drug}"[Title/Abstract]' for drug in selected
@@ -169,11 +184,12 @@ def search_pubmed(medications):
     return response.json()["esearchresult"]["idlist"]
 
 
-# ----------------------------
-# Retrieve study abstract
-# ----------------------------
+# ==========================================
+# ABSTRACT RETRIEVAL
+# ==========================================
 
 def get_study(pmid):
+
     response = requests.get(
         "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
         params={
@@ -193,27 +209,37 @@ def get_study(pmid):
 
     record = records[0]
 
+    abstract = re.sub(
+        r"<[^>]+>",
+        " ",
+        record.get("abstractText") or ""
+    )
+
     return {
         "pmid": pmid,
         "title": record.get("title", "Untitled study"),
-        "abstract": re.sub(
-            r"<[^>]+>", " ",
-            record.get("abstractText", "")
-        )
+        "abstract": abstract
     }
 
 
-# ----------------------------
-# Website interface
-# ----------------------------
+# ==========================================
+# WEBSITE INTERFACE
+# ==========================================
 
 st.title("GLP-1 Evidence Explorer")
-st.subheader("AI-Assisted Clinical & Pharmacoeconomic Evaluation")
+
+st.subheader(
+    "AI-Assisted Clinical & Pharmacoeconomic Evaluation"
+)
 
 st.info(
     "Research prototype for educational use only. "
-    "AI-extracted evidence requires verification."
+    "AI-extracted evidence must be independently verified."
 )
+
+# ------------------------------------------
+# PATIENT INFORMATION
+# ------------------------------------------
 
 st.header("1. Patient Information")
 
@@ -230,8 +256,17 @@ with col1:
 with col2:
     insurance = st.selectbox(
         "Insurance Type",
-        ["Commercial", "Medicare", "Medicaid", "Uninsured"]
+        [
+            "Commercial",
+            "Medicare",
+            "Medicaid",
+            "Uninsured"
+        ]
     )
+
+# ------------------------------------------
+# MEDICATION SELECTION
+# ------------------------------------------
 
 st.header("2. Select Medications")
 
@@ -250,6 +285,10 @@ medications = st.multiselect(
     ]
 )
 
+# ------------------------------------------
+# CLINICAL EVIDENCE SEARCH
+# ------------------------------------------
+
 st.header("3. Clinical Evidence Search")
 
 if st.button("Compare Medications", type="primary"):
@@ -258,6 +297,7 @@ if st.button("Compare Medications", type="primary"):
         st.warning("Please select at least one medication.")
 
     else:
+
         try:
             with st.spinner("Searching PubMed..."):
                 pmids = search_pubmed(medications)
@@ -270,6 +310,7 @@ if st.button("Compare Medications", type="primary"):
                 st.info("No matching studies were found.")
 
             else:
+
                 st.subheader("PubMed Search Results")
 
                 for pmid in pmids:
@@ -281,9 +322,9 @@ if st.button("Compare Medications", type="primary"):
                 st.subheader("4. AI-Extracted Clinical Evidence")
 
                 st.caption(
-                    "Testing automatic extraction on the first "
-                    "3 search results. These studies have not yet "
-                    "been manually screened for eligibility."
+                    "Testing AI extraction on the first three "
+                    "PubMed results. Study eligibility and "
+                    "extracted values have not yet been verified."
                 )
 
                 for pmid in pmids[:3]:
@@ -296,11 +337,14 @@ if st.button("Compare Medications", type="primary"):
                         try:
                             study = get_study(pmid)
 
-                            if not study:
-                                st.warning("Study record not found.")
+                            if study is None:
+                                st.warning("Study not found.")
                                 continue
 
-                            st.write("**Study:**", study["title"])
+                            st.write(
+                                "**Study:**",
+                                study["title"]
+                            )
 
                             st.markdown(
                                 f"[View original PubMed record]"
@@ -308,7 +352,9 @@ if st.button("Compare Medications", type="primary"):
                             )
 
                             if not study["abstract"]:
-                                st.warning("No abstract available.")
+                                st.warning(
+                                    "No abstract available for this study."
+                                )
                                 continue
 
                             with st.spinner(
@@ -328,23 +374,34 @@ if st.button("Compare Medications", type="primary"):
                                 st.json(extraction)
 
                                 st.caption(
-                                    "Unverified AI extraction. "
-                                    "Check all values against the "
-                                    "original publication."
+                                    "AI-generated extraction. "
+                                    "Verify numerical results against "
+                                    "the original publication."
                                 )
 
                         except (
                             requests.RequestException,
                             KeyError,
-                            IndexError
+                            IndexError,
+                            ValueError
                         ) as error:
                             st.warning(
                                 f"Could not process study: {error}"
                             )
 
-        except (requests.RequestException, KeyError) as error:
-            st.error(f"PubMed search failed: {error}")
+        except (
+            requests.RequestException,
+            KeyError,
+            ValueError
+        ) as error:
+            st.error(
+                f"PubMed search failed: {error}"
+            )
 
+
+# ==========================================
+# FOOTER
+# ==========================================
 
 st.divider()
 
