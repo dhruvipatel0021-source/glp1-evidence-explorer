@@ -1,5 +1,74 @@
 import streamlit as st
 import requests
+import json
+import time
+
+def extract_with_gemini(abstract):
+    api_key = st.secrets["GEMINI_API_KEY"]
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/"
+        "models/gemini-3.8-flash:generateContent"
+    )
+
+    prompt = f"""
+    You are extracting clinical trial evidence for a PharmD research project.
+
+    Extract information ONLY from the abstract below.
+    Do not invent missing values.
+
+    Return a JSON object containing:
+    - study_design
+    - medications
+    - doses
+    - sample_size
+    - duration
+    - hba1c_results
+    - weight_results
+    - adverse_events
+
+    Use null for information not reported.
+    Preserve separate treatment arms and doses.
+    Include exact supporting passages for numerical results.
+
+    ABSTRACT:
+    {abstract}
+    """
+
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                url,
+                headers={"x-goog-api-key": api_key},
+                json={
+                    "contents": [
+                        {"parts": [{"text": prompt}]}
+                    ],
+                    "generationConfig": {
+                        "responseMimeType": "application/json"
+                    }
+                },
+                timeout=90
+            )
+
+            if response.status_code in (429, 503):
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+
+            response.raise_for_status()
+
+            result = response.json()
+            extracted_text = result["candidates"][0]["content"]["parts"][0]["text"]
+
+            return json.loads(extracted_text)
+
+        except (requests.RequestException, KeyError, ValueError) as error:
+            if attempt == 2:
+                return {"error": str(error)}
+
+    return {"error": "Gemini is temporarily unavailable."}
+import requests
 st.set_page_config(
     page_title="GLP-1 Evidence Explorer",
     page_icon="💊",
