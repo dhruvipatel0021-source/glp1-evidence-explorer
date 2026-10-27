@@ -48,7 +48,7 @@ ABSTRACT:
 
     # Models can become unavailable or overloaded.
     # Try the newer model first.
-    models = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+    models = ["gemini-3.8-flash"]
 
     last_error = "No available Gemini model responded."
 
@@ -87,7 +87,13 @@ ABSTRACT:
                         continue
                     break
 
-                if response.status_code == 404:
+                if response.status_code in (400, 404):
+    return {
+        "error": (
+            f"Gemini returned HTTP {response.status_code}: "
+            f"{response.text[:500]}"
+        )
+    }
                     last_error = f"{model}: model unavailable"
                     break
 
