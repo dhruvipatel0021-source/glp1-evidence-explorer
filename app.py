@@ -327,7 +327,7 @@ if st.button("Compare Medications", type="primary"):
                     "extracted values have not yet been verified."
                 )
 
-                for pmid in pmids[:3]:
+                for pmid in pmids[:1]:
 
                     with st.expander(
                         f"Study PMID: {pmid}",
