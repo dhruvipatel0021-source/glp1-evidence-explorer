@@ -60,7 +60,7 @@ ABSTRACT:
         f"models/{model}:generateContent"
     )
 
-    for attempt in range(3):
+    for attempt in range(1):
         try:
             response = requests.post(
                 url,
